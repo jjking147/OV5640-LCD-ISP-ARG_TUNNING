@@ -1,0 +1,54 @@
+# 编译产物
+*.o
+*.d
+*.so
+*.a
+*.elf
+*.bin
+*.hex
+
+# 可执行文件
+app/camera_tuning
+
+# 测试结果和日志
+*.log
+*.yuv
+*.png
+*.jpg
+results/
+stability_report.md
+perf_report.md
+
+# Claude Code 配置（本地配置）
+.claude/settings.local.json
+
+# MCP 配置（包含 API 密钥）
+.mcp.json
+
+# Skills lock 文件
+skills-lock.json
+
+# 编辑器和 IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 调试文件
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# 交叉编译工具链
+/opt/toolchains/
+
+# 板子上的临时文件
+test.yuv
+output_frame*.bin
+output_frame*.png
