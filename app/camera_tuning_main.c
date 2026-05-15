@@ -42,9 +42,10 @@ typedef enum {
     MODE_PERF          /* 性能分析模式 */
 } run_mode_t;
 
-/* ========== Ring Buffer ========== */
+/* ========== Ring Buffer (零拷贝版本) ========== */
 typedef struct {
-    uint8_t *data[RING_SIZE];
+    void *data[RING_SIZE];      /* V4L2 buffer指针，不拷贝数据 */
+    int v4l2_idx[RING_SIZE];    /* V4L2 buffer索引，用于归还 */
     size_t size[RING_SIZE];
     int head;
     int tail;
@@ -60,15 +61,11 @@ static run_mode_t run_mode = MODE_PREVIEW;
 /* 全局模块 */
 static ov5640_tuning_t ov5640;
 static perf_context_t perf;
+static v4l2_camera_t g_cam;  /* 全局摄像头句柄，用于显示线程归还buffer */
 
 static int ring_init(ring_buffer_t *rb)
 {
     memset(rb, 0, sizeof(*rb));
-    for (int i = 0; i < RING_SIZE; i++) {
-        rb->data[i] = malloc(CAPTURE_W * CAPTURE_H * 2);
-        if (!rb->data[i])
-            return -1;
-    }
     pthread_mutex_init(&rb->lock, NULL);
     pthread_cond_init(&rb->cond, NULL);
     return 0;
@@ -76,22 +73,20 @@ static int ring_init(ring_buffer_t *rb)
 
 static void ring_free(ring_buffer_t *rb)
 {
-    for (int i = 0; i < RING_SIZE; i++) {
-        free(rb->data[i]);
-        rb->data[i] = NULL;
-    }
     pthread_mutex_destroy(&rb->lock);
     pthread_cond_destroy(&rb->cond);
 }
 
-static int ring_put(ring_buffer_t *rb, const void *data, size_t size)
+/* 零拷贝：只传递指针，不拷贝数据 */
+static int ring_put(ring_buffer_t *rb, void *data, int v4l2_idx, size_t size)
 {
     pthread_mutex_lock(&rb->lock);
     if (rb->count >= RING_SIZE) {
         rb->tail = (rb->tail + 1) % RING_SIZE;
         rb->count--;
     }
-    memcpy(rb->data[rb->head], data, size);
+    rb->data[rb->head] = data;
+    rb->v4l2_idx[rb->head] = v4l2_idx;
     rb->size[rb->head] = size;
     rb->head = (rb->head + 1) % RING_SIZE;
     rb->count++;
@@ -100,12 +95,14 @@ static int ring_put(ring_buffer_t *rb, const void *data, size_t size)
     return 0;
 }
 
-static int ring_get(ring_buffer_t *rb, void *data, size_t *size)
+/* 零拷贝：返回指针，不拷贝数据 */
+static int ring_get(ring_buffer_t *rb, void **data, int *v4l2_idx, size_t *size)
 {
     pthread_mutex_lock(&rb->lock);
     while (rb->count == 0)
         pthread_cond_wait(&rb->cond, &rb->lock);
-    memcpy(data, rb->data[rb->tail], rb->size[rb->tail]);
+    *data = rb->data[rb->tail];
+    *v4l2_idx = rb->v4l2_idx[rb->tail];
     *size = rb->size[rb->tail];
     rb->tail = (rb->tail + 1) % RING_SIZE;
     rb->count--;
@@ -121,8 +118,7 @@ static void sig_handler(int sig)
 }
 
 /* ========== 采集线程 ========== */
-/* 直接传递V4L2采集的数据，不经过软件ISP处理 */
-/* 图像质量由OV5640内部ISP通过寄存器调优实现 */
+/* 零拷贝：只传递V4L2 buffer指针，不拷贝数据 */
 static void *capture_thread(void *arg)
 {
     v4l2_camera_t *cam = (v4l2_camera_t *)arg;
@@ -138,7 +134,7 @@ static void *capture_thread(void *arg)
         size_t size = 0;
 
         perf_timer_start(&timer);
-        int idx = v4l2_camera_get_frame(cam, &data, &size);
+        int idx = v4l2_camera_get_frame(&g_cam, &data, &size);
         double latency = perf_timer_stop(&timer);
 
         if (idx < 0) {
@@ -147,9 +143,8 @@ static void *capture_thread(void *arg)
             continue;
         }
 
-        /* 直接传递原始数据，不做软件ISP处理 */
-        ring_put(&ring, data, size);
-        v4l2_camera_put_frame(cam, idx);
+        /* 零拷贝：只传递指针，不拷贝数据 */
+        ring_put(&ring, data, idx, size);
 
         /* 更新性能统计 */
         perf_record_frame(&perf);
@@ -176,13 +171,10 @@ static void *capture_thread(void *arg)
 }
 
 /* ========== 显示线程 ========== */
+/* 零拷贝：直接使用V4L2 buffer指针，显示完成后归还buffer */
 static void *display_thread(void *arg)
 {
     fb_context_t *fb = (fb_context_t *)arg;
-    uint8_t *frame = malloc(CAPTURE_W * CAPTURE_H * 2);
-    if (!frame)
-        return NULL;
-    size_t frame_size;
     int offset_x = (DISPLAY_W - CAPTURE_W) / 2;
     int offset_y = (DISPLAY_H - CAPTURE_H) / 2;
     int display_count = 0;
@@ -193,18 +185,25 @@ static void *display_thread(void *arg)
     printf("[DISP] offset=(%d,%d), thread start\n", offset_x, offset_y);
 
     while (!quit) {
-        ring_get(&ring, frame, &frame_size);
-        (void)frame_size;
+        void *frame = NULL;
+        int v4l2_idx = -1;
+        size_t frame_size = 0;
 
-        /* RGB565直接复制到framebuffer，不需要格式转换 */
-        /* 每行复制，处理居中显示 */
+        /* 零拷贝：获取V4L2 buffer指针 */
+        ring_get(&ring, &frame, &v4l2_idx, &frame_size);
+
+        /* 直接写入显存，跳过backbuf */
         uint16_t *src = (uint16_t *)frame;
+        uint16_t *fb_mem = (uint16_t *)fb->mmap_start;
         for (int y = 0; y < CAPTURE_H && (y + offset_y) < DISPLAY_H; y++) {
-            uint16_t *dst = &fb->backbuf[(y + offset_y) * fb->width + offset_x];
+            uint16_t *dst = &fb_mem[(y + offset_y) * fb->width + offset_x];
             memcpy(dst, &src[y * CAPTURE_W], CAPTURE_W * 2);
         }
 
-        fb_flush(fb);
+        /* 归还V4L2 buffer给内核 */
+        if (v4l2_idx >= 0) {
+            v4l2_camera_put_frame(&g_cam, v4l2_idx);
+        }
         display_count++;
         fps_count++;
 
@@ -220,7 +219,6 @@ static void *display_thread(void *arg)
         }
     }
 
-    free(frame);
     printf("[DISP] thread exit, %d displayed\n", display_count);
     return NULL;
 }
@@ -330,7 +328,7 @@ static int my_stability_capture(void *user_data, uint8_t *buf, size_t size, doub
     perf_timer_start(&timer);
     void *data = NULL;
     size_t frame_size = 0;
-    int idx = v4l2_camera_get_frame(cam, &data, &frame_size);
+    int idx = v4l2_camera_get_frame(&g_cam, &data, &frame_size);
     double latency = perf_timer_stop(&timer);
 
     if (idx < 0) {
@@ -340,7 +338,7 @@ static int my_stability_capture(void *user_data, uint8_t *buf, size_t size, doub
 
     if (frame_size > size) frame_size = size;
     memcpy(buf, data, frame_size);
-    v4l2_camera_put_frame(cam, idx);
+    v4l2_camera_put_frame(&g_cam, idx);
 
     *latency_ms = latency;
     return 0;
@@ -355,7 +353,6 @@ static void my_stability_cleanup(void *user_data)
 /* ========== 主函数 ========== */
 int main(int argc, char *argv[])
 {
-    v4l2_camera_t cam;
     fb_context_t fb;
     pthread_t cap_tid, disp_tid, mon_tid, tun_tid;
     stability_context_t stability;
@@ -397,7 +394,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (v4l2_camera_init(&cam, "/dev/video1", CAPTURE_W, CAPTURE_H,
+    if (v4l2_camera_init(&g_cam, "/dev/video1", CAPTURE_W, CAPTURE_H,
                          CAM_PIXFMT, 4) < 0) {
         fprintf(stderr, "Camera init failed\n");
         fb_close(&fb);
@@ -406,7 +403,7 @@ int main(int argc, char *argv[])
 
     if (ring_init(&ring) < 0) {
         fprintf(stderr, "Ring buffer init failed\n");
-        v4l2_camera_close(&cam);
+        v4l2_camera_close(&g_cam);
         fb_close(&fb);
         return 1;
     }
@@ -419,15 +416,15 @@ int main(int argc, char *argv[])
     /* 初始化性能分析 */
     perf_init(&perf);
 
-    v4l2_camera_start(&cam);
+    v4l2_camera_start(&g_cam);
 
     /* 启动线程 */
-    pthread_create(&cap_tid, NULL, capture_thread, &cam);
+    pthread_create(&cap_tid, NULL, capture_thread, &g_cam);
     pthread_create(&disp_tid, NULL, display_thread, &fb);
     pthread_create(&mon_tid, NULL, monitor_thread, NULL);
 
     if (run_mode == MODE_TUNING) {
-        pthread_create(&tun_tid, NULL, tuning_thread, &cam);
+        pthread_create(&tun_tid, NULL, tuning_thread, &g_cam);
     }
 
     if (run_mode == MODE_STABILITY) {
@@ -444,7 +441,7 @@ int main(int argc, char *argv[])
 
         stability_init(&stability, &config);
         stability_run(&stability, my_stability_init, my_stability_capture,
-                     my_stability_cleanup, &cam);
+                     my_stability_cleanup, &g_cam);
     }
 
     /* 等待退出 */
@@ -467,7 +464,7 @@ int main(int argc, char *argv[])
     }
 
     ov5640_tuning_close(&ov5640);
-    v4l2_camera_close(&cam);
+    v4l2_camera_close(&g_cam);
     ring_free(&ring);
     fb_close(&fb);
 
