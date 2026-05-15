@@ -15,7 +15,6 @@
 #include "v4l2_utils.h"
 #include "fb_utils.h"
 #include "ov5640_tuning.h"
-#include "isp_processing.h"
 #include "stability_test.h"
 #include "perf_analysis.h"
 
@@ -27,7 +26,6 @@
 #include <unistd.h>
 #include <time.h>
 #include <getopt.h>
-#include "imgproc.h"
 
 /* ========== 参数配置 ========== */
 #define CAPTURE_W 640
@@ -61,7 +59,6 @@ static run_mode_t run_mode = MODE_PREVIEW;
 
 /* 全局模块 */
 static ov5640_tuning_t ov5640;
-static isp_context_t isp;
 static perf_context_t perf;
 
 static int ring_init(ring_buffer_t *rb)
@@ -124,6 +121,8 @@ static void sig_handler(int sig)
 }
 
 /* ========== 采集线程 ========== */
+/* 直接传递V4L2采集的数据，不经过软件ISP处理 */
+/* 图像质量由OV5640内部ISP通过寄存器调优实现 */
 static void *capture_thread(void *arg)
 {
     v4l2_camera_t *cam = (v4l2_camera_t *)arg;
@@ -131,10 +130,6 @@ static void *capture_thread(void *arg)
     int fps_count = 0;
     perf_timer_t timer;
     struct timespec fps_start, fps_now;
-
-    /* 预分配处理缓冲区，避免每帧malloc/free */
-    uint8_t *processed_buf = malloc(CAPTURE_W * CAPTURE_H * 2);
-    int use_isp = (isp.ae_enabled || isp.awb_enabled);
 
     clock_gettime(CLOCK_MONOTONIC, &fps_start);
 
@@ -152,14 +147,8 @@ static void *capture_thread(void *arg)
             continue;
         }
 
-        /* 仅在ISP功能使能时才处理，否则直接传递原始数据 */
-        if (use_isp && processed_buf) {
-            isp_process_frame(&isp, data, processed_buf, CAPTURE_W, CAPTURE_H);
-            ring_put(&ring, processed_buf, size);
-        } else {
-            ring_put(&ring, data, size);
-        }
-
+        /* 直接传递原始数据，不做软件ISP处理 */
+        ring_put(&ring, data, size);
         v4l2_camera_put_frame(cam, idx);
 
         /* 更新性能统计 */
@@ -182,7 +171,6 @@ static void *capture_thread(void *arg)
         }
     }
 
-    free(processed_buf);
     printf("[CAP] thread exit, total %d frames\n", frame_count);
     return NULL;
 }
@@ -208,14 +196,13 @@ static void *display_thread(void *arg)
         ring_get(&ring, frame, &frame_size);
         (void)frame_size;
 
-        /* 清空绘制区域 */
-        for (int y = offset_y; y < offset_y + CAPTURE_H && y < DISPLAY_H; y++)
-            memset(&fb->backbuf[y * fb->width + offset_x], 0, CAPTURE_W * 2);
-
-        /* 显示图像 */
-        yuyv_to_rgb565_center(frame, CAPTURE_W, CAPTURE_H,
-                              fb->backbuf, fb->width, fb->height,
-                              offset_x, offset_y);
+        /* RGB565直接复制到framebuffer，不需要格式转换 */
+        /* 每行复制，处理居中显示 */
+        uint16_t *src = (uint16_t *)frame;
+        for (int y = 0; y < CAPTURE_H && (y + offset_y) < DISPLAY_H; y++) {
+            uint16_t *dst = &fb->backbuf[(y + offset_y) * fb->width + offset_x];
+            memcpy(dst, &src[y * CAPTURE_W], CAPTURE_W * 2);
+        }
 
         fb_flush(fb);
         display_count++;
@@ -411,7 +398,7 @@ int main(int argc, char *argv[])
     }
 
     if (v4l2_camera_init(&cam, "/dev/video1", CAPTURE_W, CAPTURE_H,
-                         V4L2_PIX_FMT_YUYV, 4) < 0) {
+                         CAM_PIXFMT, 4) < 0) {
         fprintf(stderr, "Camera init failed\n");
         fb_close(&fb);
         return 1;
@@ -428,9 +415,6 @@ int main(int argc, char *argv[])
     if (ov5640_tuning_init(&ov5640, "/dev/i2c-1") < 0) {
         fprintf(stderr, "OV5640 tuning init failed (may not be available)\n");
     }
-
-    /* 初始化ISP模块 */
-    isp_init(&isp);
 
     /* 初始化性能分析 */
     perf_init(&perf);

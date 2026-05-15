@@ -58,22 +58,57 @@ int v4l2_camera_init(v4l2_camera_t *cam,
     fmt.fmt.pix.width = width;
     fmt.fmt.pix.height = height;
     fmt.fmt.pix.pixelformat = pixfmt;
-    fmt.fmt.pix.field = V4L2_FIELD_ANY;    // 任意场，一般是行扫描
-    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) // 又是尝试设置格式了
+    fmt.fmt.pix.field = V4L2_FIELD_ANY;
+
+    printf("[V4L2] requesting format: 0x%x (%c%c%c%c)\n",
+           pixfmt,
+           (pixfmt >> 0) & 0xFF,
+           (pixfmt >> 8) & 0xFF,
+           (pixfmt >> 16) & 0xFF,
+           (pixfmt >> 24) & 0xFF);
+
+    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0)
     {
         perror("VIDIOC_S_FMT");
         goto err;
     }
-    // 最终匹配格式
+
+    /* 检查实际设置的格式 */
     cam->width = fmt.fmt.pix.width;
     cam->height = fmt.fmt.pix.height;
-    printf("[V4L2] %s: %dx%d, pixelformat=0x%x (%c%c%c%c)\n",
-           dev, cam->width, cam->height,
+    printf("[V4L2] actual format: 0x%x (%c%c%c%c)\n",
            fmt.fmt.pix.pixelformat,
            (fmt.fmt.pix.pixelformat >> 0) & 0xFF,
            (fmt.fmt.pix.pixelformat >> 8) & 0xFF,
            (fmt.fmt.pix.pixelformat >> 16) & 0xFF,
            (fmt.fmt.pix.pixelformat >> 24) & 0xFF);
+    printf("[V4L2] bytesperline=%d, sizeimage=%d\n",
+           fmt.fmt.pix.bytesperline, fmt.fmt.pix.sizeimage);
+
+    /* 如果驱动返回的格式不是我们请求的，说明不支持 */
+    if (fmt.fmt.pix.pixelformat != pixfmt) {
+        printf("[V4L2] WARNING: Requested RGB565 but got different format!\n");
+        printf("[V4L2] Falling back to YUYV format\n");
+        /* 回退到YUYV格式 */
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        fmt.fmt.pix.width = width;
+        fmt.fmt.pix.height = height;
+        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+        fmt.fmt.pix.field = V4L2_FIELD_ANY;
+        if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+            perror("VIDIOC_S_FMT fallback");
+            goto err;
+        }
+        cam->width = fmt.fmt.pix.width;
+        cam->height = fmt.fmt.pix.height;
+        printf("[V4L2] fallback format: 0x%x (%c%c%c%c)\n",
+               fmt.fmt.pix.pixelformat,
+               (fmt.fmt.pix.pixelformat >> 0) & 0xFF,
+               (fmt.fmt.pix.pixelformat >> 8) & 0xFF,
+               (fmt.fmt.pix.pixelformat >> 16) & 0xFF,
+               (fmt.fmt.pix.pixelformat >> 24) & 0xFF);
+    }
 
     /* 申请 buffer */
     memset(&req, 0, sizeof(req));

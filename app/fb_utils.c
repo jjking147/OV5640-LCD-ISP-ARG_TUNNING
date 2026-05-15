@@ -40,14 +40,31 @@ int fb_init(fb_context_t *fb, const char *dev, int target_bpp)
     }
     printf("[FB] current: %dx%d, %dbpp\n",
            vinfo.xres, vinfo.yres, vinfo.bits_per_pixel);
+    printf("[FB] original: R(%d,%d) G(%d,%d) B(%d,%d)\n",
+           vinfo.red.offset, vinfo.red.length,
+           vinfo.green.offset, vinfo.green.length,
+           vinfo.blue.offset, vinfo.blue.length);
 
-    /* 尝试切换 bpp */
-    if (target_bpp > 0 && vinfo.bits_per_pixel != (unsigned int)target_bpp)
-    {
-        vinfo.bits_per_pixel = target_bpp;
+    /* 设置RGB565位域，与OV5640输出的RGB565_LE格式一致 */
+    if (target_bpp == 16) {
+        /* RGB565: R(5) G(6) B(5) */
+        vinfo.bits_per_pixel = 16;
+        vinfo.red.offset = 11;
+        vinfo.red.length = 5;
+        vinfo.red.msb_right = 0;
+        vinfo.green.offset = 5;
+        vinfo.green.length = 6;
+        vinfo.green.msb_right = 0;
+        vinfo.blue.offset = 0;
+        vinfo.blue.length = 5;
+        vinfo.blue.msb_right = 0;
+        vinfo.transp.offset = 0;
+        vinfo.transp.length = 0;
+        vinfo.transp.msb_right = 0;
+
         if (ioctl(fd, FBIOPUT_VSCREENINFO, &vinfo) < 0)
         {
-            fprintf(stderr, "[FB] set %dbpp failed\n", target_bpp);
+            fprintf(stderr, "[FB] set RGB565 format failed\n");
         }
         else
         {
@@ -56,7 +73,10 @@ int fb_init(fb_context_t *fb, const char *dev, int target_bpp)
                 perror("FBIOGET_VSCREENINFO");
                 goto err;
             }
-            printf("[FB] switched to %dbpp\n", vinfo.bits_per_pixel);
+            printf("[FB] RGB565 format set: R(%d,%d) G(%d,%d) B(%d,%d)\n",
+                   vinfo.red.offset, vinfo.red.length,
+                   vinfo.green.offset, vinfo.green.length,
+                   vinfo.blue.offset, vinfo.blue.length);
         }
     }
 

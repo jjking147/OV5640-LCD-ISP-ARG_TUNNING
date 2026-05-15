@@ -6,16 +6,16 @@ LDFLAGS = -lm
 
 # 目标文件
 TARGET = camera_tuning
-OBJS = camera_tuning_main.o v4l2_utils.o fb_utils.o imgproc.o \
-       ov5640_tuning.o isp_processing.o stability_test.o perf_analysis.o
+OBJS = camera_tuning_main.o v4l2_utils.o fb_utils.o \
+       ov5640_tuning.o stability_test.o perf_analysis.o
 
 # 源文件
-SRCS = camera_tuning_main.c v4l2_utils.c fb_utils.c imgproc.c \
-       ov5640_tuning.c isp_processing.c stability_test.c perf_analysis.c
+SRCS = camera_tuning_main.c v4l2_utils.c fb_utils.c \
+       ov5640_tuning.c stability_test.c perf_analysis.c
 
 # 头文件
-HDRS = v4l2_utils.h fb_utils.h imgproc.h ov5640_tuning.h \
-       isp_processing.h stability_test.h perf_analysis.h
+HDRS = v4l2_utils.h fb_utils.h ov5640_tuning.h \
+       stability_test.h perf_analysis.h
 
 all: $(TARGET)
 

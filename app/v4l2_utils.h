@@ -13,7 +13,7 @@
 #define CAM_DEV "/dev/video1"
 #define CAM_WIDTH 640
 #define CAM_HEIGHT 480
-#define CAM_PIXFMT V4L2_PIX_FMT_YUYV
+#define CAM_PIXFMT V4L2_PIX_FMT_RGB565  /* 直接输出RGB565，避免CPU转换 */
 #define CAM_NBUFS 4
 
 /* V4L2 buffer 封装 */
